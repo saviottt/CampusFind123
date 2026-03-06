@@ -13,7 +13,7 @@
           <div class="profile-meta">
             <div class="pm-item"><span>📧</span>{{ user.email }}</div>
             <div class="pm-item"><span>🪪</span>{{ user.student_id }}</div>
-            <div class="pm-item"><span>📅</span>Joined {{ user.created_at[:10] }}</div>
+            <div class="pm-item"><span>📅</span>Joined {{ user.created_at | format_datetime(10) }}</div>
           </div>
           <div class="profile-stats">
             <div class="ps-item">
@@ -31,7 +31,8 @@
           </div>
           <div class="profile-actions">
             <a href="{{ url_for('report_item', item_type='lost') }}" class="btn btn-outline btn-full">+ Report Lost</a>
-            <a href="{{ url_for('report_item', item_type='found') }}" class="btn btn-primary btn-full">+ Report Found</a>
+            <a href="{{ url_for('report_item', item_type='found') }}" class="btn btn-primary btn-full">+ Report
+              Found</a>
           </div>
           <a href="{{ url_for('logout') }}" class="logout-link">Logout →</a>
         </div>
@@ -49,66 +50,66 @@
 
         <div class="ptab-content active" id="tab-items">
           {% if my_items %}
-            <div class="my-items-list">
-              {% for item in my_items %}
-              <div class="my-item-row">
-                <div class="mir-img">
-                  {% if item.image_path %}
-                    <img src="{{ url_for('static', filename='uploads/' + item.image_path) }}" alt=""/>
-                  {% else %}
-                    <div class="mir-no-img">📦</div>
-                  {% endif %}
-                </div>
-                <div class="mir-info">
-                  <div class="mir-top">
-                    <span class="item-type-pill {{ item.type }}-pill">{{ item.type.upper() }}</span>
-                    <span class="detail-status status-{{ item.status }}">
-                      {% if item.status == 'active' %}● Active
-                      {% elif item.status == 'returned' %}✓ Returned
-                      {% else %}✕ Closed{% endif %}
-                    </span>
-                  </div>
-                  <a href="{{ url_for('item_detail', item_id=item.id) }}" class="mir-title">{{ item.title }}</a>
-                  <div class="mir-meta">
-                    <span>📍 {{ item.location }}</span>
-                    <span>📅 {{ item.date_occurred }}</span>
-                    <span>🏷️ {{ item.category }}</span>
-                  </div>
-                </div>
-                <a href="{{ url_for('item_detail', item_id=item.id) }}" class="btn btn-sm btn-outline">View →</a>
+          <div class="my-items-list">
+            {% for item in my_items %}
+            <div class="my-item-row">
+              <div class="mir-img">
+                {% if item.image_path %}
+                <img src="{{ url_for('static', filename='uploads/' + item.image_path) }}" alt="" />
+                {% else %}
+                <div class="mir-no-img">📦</div>
+                {% endif %}
               </div>
-              {% endfor %}
+              <div class="mir-info">
+                <div class="mir-top">
+                  <span class="item-type-pill {{ item.type }}-pill">{{ item.type.upper() }}</span>
+                  <span class="detail-status status-{{ item.status }}">
+                    {% if item.status == 'active' %}● Active
+                    {% elif item.status == 'returned' %}✓ Returned
+                    {% else %}✕ Closed{% endif %}
+                  </span>
+                </div>
+                <a href="{{ url_for('item_detail', item_id=item.id) }}" class="mir-title">{{ item.title }}</a>
+                <div class="mir-meta">
+                  <span>📍 {{ item.location }}</span>
+                  <span>📅 {{ item.date_occurred }}</span>
+                  <span>🏷️ {{ item.category }}</span>
+                </div>
+              </div>
+              <a href="{{ url_for('item_detail', item_id=item.id) }}" class="btn btn-sm btn-outline">View →</a>
             </div>
+            {% endfor %}
+          </div>
           {% else %}
-            <div class="empty-state">
-              <span class="empty-icon">📋</span>
-              <p>You haven't reported any items yet.</p>
-              <a href="{{ url_for('report_item', item_type='lost') }}" class="btn btn-primary">Report an Item</a>
-            </div>
+          <div class="empty-state">
+            <span class="empty-icon">📋</span>
+            <p>You haven't reported any items yet.</p>
+            <a href="{{ url_for('report_item', item_type='lost') }}" class="btn btn-primary">Report an Item</a>
+          </div>
           {% endif %}
         </div>
 
         <div class="ptab-content" id="tab-notifs">
           {% if notifications %}
-            <div class="notifs-list">
-              {% for notif in notifications %}
-              <div class="notif-item {{ 'unread' if not notif.is_read }}">
-                <div class="notif-content">
-                  <strong>{{ notif.title }}</strong>
-                  <p>{{ notif.body }}</p>
-                  <small>{{ notif.created_at[:16] }}</small>
-                </div>
-                {% if notif.link %}
-                <a href="{{ notif.link }}" class="btn btn-sm btn-outline">View →</a>
-                {% endif %}
+          <div class="notifs-list">
+            {% for notif in notifications %}
+            <div class="notif-item {{ 'unread' if not notif.is_read }}">
+              <div class="notif-content">
+                <strong>{{ notif.title }}</strong>
+                <p>{{ notif.body }}</p>
+                <small>{{ notif.created_at | format_datetime(16) }}</small>
               </div>
-              {% endfor %}
+              {% if notif.link %}
+              <a href="{{ notif.link }}" class="btn btn-sm btn-outline">View →</a>
+              {% endif %}
             </div>
+            {% endfor %}
+          </div>
           {% else %}
-            <div class="empty-state">
-              <span class="empty-icon">🔔</span>
-              <p>No notifications yet. You'll be notified when matches are found!</p>
-            </div>
+          <div class="empty-state">
+            <span class="empty-icon">🔔</span>
+            <p>No notifications yet. You'll be notified when matches are found!</p>
+          </div>
           {% endif %}
         </div>
 

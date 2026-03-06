@@ -1,8 +1,8 @@
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-import sqlite3, os, json, re
-from datetime import datetime, timedelta
+import pymysql, pymysql.cursors, os, re
+from datetime import datetime
 from functools import wraps
 
 app = Flask(__name__)
@@ -11,7 +11,45 @@ app.config['UPLOAD_FOLDER'] = os.path.join('static', 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 
-DB_PATH = 'campus_lostfound.db'
+# Jinja Filter to safely handle datetime objects (MySQL) vs strings (SQLite)
+@app.template_filter('format_datetime')
+def format_datetime(value, length=None):
+    if value is None:
+        return ""
+    
+    # If it's already a string, keep it as is
+    if isinstance(value, str):
+        v = value
+    else:
+        # It's a datetime object (from MySQL)
+        v = value.strftime('%Y-%m-%d %H:%M:%S')
+        
+    if length is not None:
+        return v[:length]
+    return v
+
+# Database Configuration
+DB_NAME = 'CampusFind'
+DB_HOST = 'localhost'
+DB_USER = 'root'
+DB_PASSWORD = 'savio'  # UPDATE THIS to your actual MySQL password
+
+class DBWrapperConn:
+    def __init__(self, conn):
+        self.conn = conn
+        
+    def execute(self, sql, params=None):
+        # MySQL uses %s instead of ? for placeholders
+        sql = sql.replace('?', '%s')
+        cursor = self.conn.cursor()
+        cursor.execute(sql, params)
+        return cursor
+        
+    def commit(self):
+        self.conn.commit()
+        
+    def close(self):
+        self.conn.close()
 
 CAMPUS_LOCATIONS = [
     "Central Library", "Main Cafeteria", "Computer Science Lab",
@@ -31,64 +69,83 @@ ITEM_CATEGORIES = [
 ]
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    conn = pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        cursorclass=pymysql.cursors.DictCursor
+    )
+    return DBWrapperConn(conn)
 
 def init_db():
-    conn = get_db()
-    c = conn.cursor()
-    c.executescript('''
+    # First connection to ensure database exists
+    conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASSWORD)
+    cursor = conn.cursor()
+    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
+    cursor.close()
+    conn.close()
+
+    # Second connection to create tables
+    db = get_db()
+    cursor = db.conn.cursor()
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            student_id TEXT UNIQUE NOT NULL,
-            department TEXT NOT NULL,
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            student_id VARCHAR(255) UNIQUE NOT NULL,
+            department VARCHAR(255) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            type TEXT NOT NULL CHECK(type IN ('lost','found')),
-            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','returned','closed')),
-            title TEXT NOT NULL,
-            category TEXT NOT NULL,
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            type ENUM('lost','found') NOT NULL,
+            status ENUM('active','returned','closed') NOT NULL DEFAULT 'active',
+            title VARCHAR(255) NOT NULL,
+            category VARCHAR(255) NOT NULL,
             description TEXT NOT NULL,
-            location TEXT NOT NULL,
-            date_occurred TEXT NOT NULL,
-            contact_info TEXT,
-            image_path TEXT,
+            location VARCHAR(255) NOT NULL,
+            date_occurred VARCHAR(255) NOT NULL,
+            contact_info VARCHAR(255),
+            image_path VARCHAR(255),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER NOT NULL,
-            receiver_id INTEGER NOT NULL,
-            item_id INTEGER NOT NULL,
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            sender_id INT NOT NULL,
+            receiver_id INT NOT NULL,
+            item_id INT NOT NULL,
             message TEXT NOT NULL,
-            is_read INTEGER DEFAULT 0,
+            is_read TINYINT(1) DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(sender_id) REFERENCES users(id),
             FOREIGN KEY(receiver_id) REFERENCES users(id),
             FOREIGN KEY(item_id) REFERENCES items(id)
-        );
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            title VARCHAR(255) NOT NULL,
             body TEXT NOT NULL,
-            link TEXT,
-            is_read INTEGER DEFAULT 0,
+            link VARCHAR(255),
+            is_read TINYINT(1) DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );
+        )
     ''')
-    conn.commit()
-    conn.close()
+    db.commit()
+    db.close()
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -105,22 +162,21 @@ def login_required(f):
 def get_current_user():
     if 'user_id' not in session:
         return None
-    conn = get_db()
-    user = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
-    conn.close()
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
+    db.close()
     return user
 
 def find_matches(item_id, item_type, title, description, location, category):
-    """Find matching items of opposite type based on keywords."""
     opposite_type = 'found' if item_type == 'lost' else 'lost'
-    conn = get_db()
-    candidates = conn.execute(
+    db = get_db()
+    candidates = db.execute(
         "SELECT i.*, u.name as owner_name, u.email as owner_email FROM items i "
         "JOIN users u ON i.user_id=u.id "
         "WHERE i.type=? AND i.status='active' AND i.id!=?",
         (opposite_type, item_id)
     ).fetchall()
-    conn.close()
+    db.close()
 
     keywords = set(re.findall(r'\w+', (title + ' ' + description + ' ' + category).lower()))
     stop_words = {'the','a','an','in','on','at','was','is','were','i','my','and','or','to','of','it','this','that'}
@@ -143,13 +199,13 @@ def find_matches(item_id, item_type, title, description, location, category):
     return matches[:5]
 
 def create_notification(user_id, title, body, link=None):
-    conn = get_db()
-    conn.execute(
+    db = get_db()
+    db.execute(
         'INSERT INTO notifications (user_id, title, body, link) VALUES (?,?,?,?)',
         (user_id, title, body, link)
     )
-    conn.commit()
-    conn.close()
+    db.commit()
+    db.close()
 
 # ─── AUTH ROUTES ───────────────────────────────────────────────────────────────
 
@@ -174,23 +230,22 @@ def register():
             errors.append('Enter a valid email address.')
 
         if not errors:
-            conn = get_db()
-            existing = conn.execute('SELECT id FROM users WHERE email=? OR student_id=?', (email, student_id)).fetchone()
+            db = get_db()
+            existing = db.execute('SELECT id FROM users WHERE email=? OR student_id=?', (email, student_id)).fetchone()
             if existing:
                 errors.append('Email or Student ID already registered.')
             else:
                 hashed = generate_password_hash(password)
-                conn.execute('INSERT INTO users (name,email,password,student_id,department) VALUES (?,?,?,?,?)',
+                db.execute('INSERT INTO users (name,email,password,student_id,department) VALUES (?,?,?,?,?)',
                              (name, email, hashed, student_id, department))
-                conn.commit()
-                conn.close()
+                db.commit()
+                db.close()
                 flash('Registration successful! Please log in.', 'success')
                 return redirect(url_for('login'))
-            conn.close()
+            db.close()
 
         for e in errors:
             flash(e, 'danger')
-
     return render_template('register.html')
 
 @app.route('/login', methods=['GET','POST'])
@@ -198,9 +253,9 @@ def login():
     if request.method == 'POST':
         email = request.form.get('email','').strip().lower()
         password = request.form.get('password','')
-        conn = get_db()
-        user = conn.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
-        conn.close()
+        db = get_db()
+        user = db.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
+        db.close()
         if user and check_password_hash(user['password'], password):
             session['user_id'] = user['id']
             session['user_name'] = user['name']
@@ -219,23 +274,23 @@ def logout():
 
 @app.route('/')
 def index():
-    conn = get_db()
-    lost_items = conn.execute(
+    db = get_db()
+    lost_items = db.execute(
         "SELECT i.*,u.name as owner_name FROM items i JOIN users u ON i.user_id=u.id "
         "WHERE i.type='lost' AND i.status='active' ORDER BY i.created_at DESC LIMIT 6"
     ).fetchall()
-    found_items = conn.execute(
+    found_items = db.execute(
         "SELECT i.*,u.name as owner_name FROM items i JOIN users u ON i.user_id=u.id "
         "WHERE i.type='found' AND i.status='active' ORDER BY i.created_at DESC LIMIT 6"
     ).fetchall()
-    stats = conn.execute(
+    stats = db.execute(
         "SELECT "
         "SUM(CASE WHEN type='lost' AND status='active' THEN 1 ELSE 0 END) as lost_count,"
         "SUM(CASE WHEN type='found' AND status='active' THEN 1 ELSE 0 END) as found_count,"
         "SUM(CASE WHEN status='returned' THEN 1 ELSE 0 END) as returned_count "
         "FROM items"
     ).fetchone()
-    conn.close()
+    db.close()
     return render_template('index.html', lost_items=lost_items, found_items=found_items,
                            stats=stats, locations=CAMPUS_LOCATIONS, categories=ITEM_CATEGORIES)
 
@@ -267,18 +322,17 @@ def report_item(item_type):
             return render_template('report.html', item_type=item_type,
                                    locations=CAMPUS_LOCATIONS, categories=ITEM_CATEGORIES)
 
-        conn = get_db()
-        cursor = conn.execute(
+        db = get_db()
+        cursor = db.execute(
             'INSERT INTO items (user_id,type,title,category,description,location,date_occurred,contact_info,image_path) '
             'VALUES (?,?,?,?,?,?,?,?,?)',
             (session['user_id'], item_type, title, category, description,
              location, date_occurred, contact_info, image_path)
         )
         item_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+        db.commit()
+        db.close()
 
-        # Run matching
         matches = find_matches(item_id, item_type, title, description, location, category)
         if matches:
             match_titles = ', '.join([m['item']['title'] for m in matches[:3]])
@@ -288,7 +342,6 @@ def report_item(item_type):
                 f"Your item '{title}' may match: {match_titles}. Check the suggestions.",
                 url_for('item_detail', item_id=item_id)
             )
-            # Notify owners of matched found items too
             for m in matches:
                 if m['item']['user_id'] != session['user_id']:
                     create_notification(
@@ -306,32 +359,32 @@ def report_item(item_type):
 
 @app.route('/item/<int:item_id>')
 def item_detail(item_id):
-    conn = get_db()
-    item = conn.execute(
+    db = get_db()
+    item = db.execute(
         "SELECT i.*,u.name as owner_name,u.email as owner_email,u.department,u.student_id "
         "FROM items i JOIN users u ON i.user_id=u.id WHERE i.id=?", (item_id,)
     ).fetchone()
     if not item:
-        conn.close()
+        db.close()
         flash('Item not found.', 'danger')
         return redirect(url_for('index'))
 
     messages = []
     if 'user_id' in session:
-        messages = conn.execute(
+        messages = db.execute(
             "SELECT m.*,u.name as sender_name FROM messages m JOIN users u ON m.sender_id=u.id "
             "WHERE m.item_id=? AND (m.sender_id=? OR m.receiver_id=?) ORDER BY m.created_at ASC",
             (item_id, session['user_id'], session['user_id'])
         ).fetchall()
-        conn.execute(
+        db.execute(
             'UPDATE messages SET is_read=1 WHERE item_id=? AND receiver_id=?',
             (item_id, session['user_id'])
         )
-        conn.commit()
+        db.commit()
 
     matches = find_matches(item_id, item['type'], item['title'],
                            item['description'], item['location'], item['category'])
-    conn.close()
+    db.close()
     return render_template('item_detail.html', item=item, messages=messages,
                            matches=matches, locations=CAMPUS_LOCATIONS)
 
@@ -344,7 +397,7 @@ def search():
     date_from = request.args.get('date_from','')
     date_to = request.args.get('date_to','')
 
-    conn = get_db()
+    db = get_db()
     sql = ("SELECT i.*,u.name as owner_name FROM items i JOIN users u ON i.user_id=u.id "
            "WHERE i.status='active'")
     params = []
@@ -369,8 +422,8 @@ def search():
         params.append(date_to)
 
     sql += " ORDER BY i.created_at DESC"
-    results = conn.execute(sql, params).fetchall()
-    conn.close()
+    results = db.execute(sql, params).fetchall()
+    db.close()
 
     return render_template('search.html', results=results, q=q, category=category,
                            location=location, item_type=item_type, date_from=date_from,
@@ -391,14 +444,14 @@ def send_message():
         flash('You cannot message yourself.', 'warning')
         return redirect(url_for('item_detail', item_id=item_id))
 
-    conn = get_db()
-    conn.execute(
+    db = get_db()
+    db.execute(
         'INSERT INTO messages (sender_id,receiver_id,item_id,message) VALUES (?,?,?,?)',
         (session['user_id'], receiver_id, item_id, message_text)
     )
-    item = conn.execute('SELECT title FROM items WHERE id=?', (item_id,)).fetchone()
-    conn.commit()
-    conn.close()
+    item = db.execute('SELECT title FROM items WHERE id=?', (item_id,)).fetchone()
+    db.commit()
+    db.close()
 
     create_notification(
         receiver_id,
@@ -417,18 +470,18 @@ def update_status(item_id):
         flash('Invalid status.', 'danger')
         return redirect(url_for('item_detail', item_id=item_id))
 
-    conn = get_db()
-    item = conn.execute('SELECT * FROM items WHERE id=? AND user_id=?',
+    db = get_db()
+    item = db.execute('SELECT * FROM items WHERE id=? AND user_id=?',
                         (item_id, session['user_id'])).fetchone()
     if not item:
-        conn.close()
+        db.close()
         flash('Not authorized.', 'danger')
         return redirect(url_for('item_detail', item_id=item_id))
 
-    conn.execute('UPDATE items SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+    db.execute('UPDATE items SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
                  (new_status, item_id))
-    conn.commit()
-    conn.close()
+    db.commit()
+    db.close()
     flash(f'Item status updated to "{new_status}".', 'success')
     return redirect(url_for('item_detail', item_id=item_id))
 
@@ -436,50 +489,50 @@ def update_status(item_id):
 @login_required
 def profile():
     user = get_current_user()
-    conn = get_db()
-    my_items = conn.execute(
+    db = get_db()
+    my_items = db.execute(
         "SELECT * FROM items WHERE user_id=? ORDER BY created_at DESC",
         (session['user_id'],)
     ).fetchall()
-    notifications = conn.execute(
+    notifications = db.execute(
         "SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 20",
         (session['user_id'],)
     ).fetchall()
-    unread_msgs = conn.execute(
+    unread_msgs = db.execute(
         "SELECT COUNT(*) as cnt FROM messages WHERE receiver_id=? AND is_read=0",
         (session['user_id'],)
     ).fetchone()
-    conn.execute('UPDATE notifications SET is_read=1 WHERE user_id=?', (session['user_id'],))
-    conn.commit()
-    conn.close()
+    db.execute('UPDATE notifications SET is_read=1 WHERE user_id=?', (session['user_id'],))
+    db.commit()
+    db.close()
     return render_template('profile.html', user=user, my_items=my_items,
                            notifications=notifications, unread_msgs=unread_msgs)
 
 @app.route('/api/notifications')
 @login_required
 def api_notifications():
-    conn = get_db()
-    notifs = conn.execute(
+    db = get_db()
+    notifs = db.execute(
         "SELECT COUNT(*) as cnt FROM notifications WHERE user_id=? AND is_read=0",
         (session['user_id'],)
     ).fetchone()
-    msgs = conn.execute(
+    msgs = db.execute(
         "SELECT COUNT(*) as cnt FROM messages WHERE receiver_id=? AND is_read=0",
         (session['user_id'],)
     ).fetchone()
-    conn.close()
+    db.close()
     return jsonify({'notifications': notifs['cnt'], 'messages': msgs['cnt']})
 
 @app.route('/all_items')
 def all_items():
     item_type = request.args.get('type', 'lost')
-    conn = get_db()
-    items = conn.execute(
+    db = get_db()
+    items = db.execute(
         "SELECT i.*,u.name as owner_name FROM items i JOIN users u ON i.user_id=u.id "
         "WHERE i.type=? AND i.status='active' ORDER BY i.created_at DESC",
         (item_type,)
     ).fetchall()
-    conn.close()
+    db.close()
     return render_template('all_items.html', items=items, item_type=item_type,
                            locations=CAMPUS_LOCATIONS, categories=ITEM_CATEGORIES)
 

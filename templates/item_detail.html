@@ -53,7 +53,7 @@
               </div>
               <div class="dm-item">
                 <span class="dm-icon">🕐</span>
-                <div><label>Reported On</label><strong>{{ item.created_at[:10] }}</strong></div>
+                <div><label>Reported On</label><strong>{{ item.created_at | format_datetime(10) }}</strong></div>
               </div>
             </div>
 
